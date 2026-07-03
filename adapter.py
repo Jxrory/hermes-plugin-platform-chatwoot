@@ -46,6 +46,17 @@ DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8646
 DEFAULT_WEBHOOK_PATH = "/webhooks/chatwoot"
 
+# Mapping from Chatwoot conversation.channel to Hermes Platform.
+# The LLM uses source.platform to tailor response formatting; by detecting the
+# real source channel (Telegram, WhatsApp, etc.) we get platform-appropriate
+# output instead of treating everything as a generic Chatwoot relay message.
+_CHATWOOT_CHANNEL_MAP: Dict[str, Platform] = {
+    "Channel::Telegram": Platform.TELEGRAM,
+    "Channel::WhatsApp": Platform.WHATSAPP,
+    "Channel::Email": Platform.EMAIL,
+    "Channel::Sms": Platform.SMS,
+}
+
 
 def check_chatwoot_requirements() -> bool:
     return AIOHTTP_AVAILABLE
@@ -218,9 +229,12 @@ class ChatwootAdapter(BasePlatformAdapter):
 
         content = body.get("content", "")
 
+        channel = conversation.get("channel", "")
+        source_platform = _CHATWOOT_CHANNEL_MAP.get(channel, Platform("chatwoot"))
+
         session_chat_id = f"chatwoot:{account_id}:{conversation_id}"
         source = SessionSource(
-            platform=Platform("chatwoot"),
+            platform=source_platform,
             chat_id=session_chat_id,
             chat_type="dm",
             user_id=f"sender:{sender.get('id', '')}",
