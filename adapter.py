@@ -305,14 +305,14 @@ def _markdown_to_markdownv2(text: str) -> str:
     # 1) Protect fenced code blocks
     s = re.sub(
         r'(```(?:[^\n]*\n)?[\s\S]*?```)',
-        lambda m: _ph(m.group(0).replace('\\', '\\\\').replace('`', '\\`')),
+        lambda m: _ph(m.group(0)),
         s,
     )
 
     # 2) Protect inline code
     s = re.sub(
         r'(`[^`]+`)',
-        lambda m: _ph(m.group(0).replace('\\', '\\\\')),
+        lambda m: _ph(m.group(0)),
         s,
     )
 
