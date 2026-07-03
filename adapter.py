@@ -394,7 +394,7 @@ async def _standalone_send(pconfig, chat_id, message, **kwargs) -> dict:
         ) as session:
             async with session.post(
                 f"/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages",
-                json={"content": message, "message_type": "outgoing"},
+                json={"content": message, "message_type": "outgoing", "content_type": "text"},
             ) as resp:
                 if resp.status >= 400:
                     return {"error": f"HTTP {resp.status}"}
