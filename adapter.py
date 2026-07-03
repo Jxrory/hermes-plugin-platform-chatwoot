@@ -20,7 +20,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 from typing import Any, Dict, Optional
 
 try:
@@ -39,7 +38,6 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
 )
-from gateway.platforms.helpers import strip_markdown
 from gateway.session import SessionSource
 
 logger = logging.getLogger(__name__)
@@ -85,9 +83,6 @@ class ChatwootAdapter(BasePlatformAdapter):
         self._runner: Optional[web.AppRunner] = None
         self._http_client: Optional[ClientSession] = None
         self._account_id: Optional[int] = None
-        # Track source platform per conversation so send() can apply
-        # platform-appropriate formatting (MarkdownV2 for Telegram, etc.)
-        self._conversation_platforms: Dict[str, Platform] = {}
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not AIOHTTP_AVAILABLE:
@@ -170,17 +165,6 @@ class ChatwootAdapter(BasePlatformAdapter):
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
 
-        # Apply platform-appropriate formatting based on the source channel.
-        # Telegram: convert standard Markdown (from LLM) to MarkdownV2 so
-        # Chatwoot's Telegram integration can render bold/italic/code etc.
-        # Other platforms (WhatsApp, Email, SMS): strip to plain text since
-        # they don't support rich markdown through Chatwoot.
-        source_platform = self._conversation_platforms.get(chat_id)
-        if source_platform == Platform.TELEGRAM:
-            content = _markdown_to_markdownv2(content)
-        else:
-            content = strip_markdown(content)
-
         parts = chat_id.split(":", 2)
         if len(parts) != 3:
             return SendResult(success=False, error=f"Invalid chat_id: {chat_id}")
@@ -249,8 +233,6 @@ class ChatwootAdapter(BasePlatformAdapter):
         source_platform = _CHATWOOT_CHANNEL_MAP.get(channel, Platform("chatwoot"))
 
         session_chat_id = f"chatwoot:{account_id}:{conversation_id}"
-        # Remember the source platform so send() can apply correct formatting
-        self._conversation_platforms[session_chat_id] = source_platform
         source = SessionSource(
             platform=source_platform,
             chat_id=session_chat_id,
@@ -277,98 +259,6 @@ class ChatwootAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "chatwoot"}
 
 
-def _markdown_to_markdownv2(text: str) -> str:
-    """Convert standard Markdown to Telegram MarkdownV2 format.
-
-    Handles bold, italic, strikethrough, spoiler, inline code, fenced code
-    blocks, headers, links, and escapes all remaining MarkdownV2-special
-    characters so the message renders correctly when Chatwoot sends it to
-    Telegram with ``parse_mode=MarkdownV2``.
-    """
-    if not text:
-        return text
-
-    placeholders: dict = {}
-    counter = [0]
-
-    def _ph(value: str) -> str:
-        key = f"\x00PH{counter[0]}\x00"
-        counter[0] += 1
-        placeholders[key] = value
-        return key
-
-    def _escape_mdv2(s: str) -> str:
-        return re.sub(r'([_*\[\]()~`>#+\-=|{}.!\\])', r'\\\1', s)
-
-    s = text
-
-    # 1) Protect fenced code blocks
-    s = re.sub(
-        r'(```(?:[^\n]*\n)?[\s\S]*?```)',
-        lambda m: _ph(m.group(0)),
-        s,
-    )
-
-    # 2) Protect inline code
-    s = re.sub(
-        r'(`[^`]+`)',
-        lambda m: _ph(m.group(0)),
-        s,
-    )
-
-    # 3) Convert links [text](url)
-    s = re.sub(
-        r'\[([^\]]+)\]\(([^()]+)\)',
-        lambda m: _ph(f'[{_escape_mdv2(m.group(1))}]({m.group(2).replace(")", "\\)")})'),
-        s,
-    )
-
-    # 4) Convert headers ## Title → *Title*
-    s = re.sub(
-        r'^#{1,6}\s+(.+)$',
-        lambda m: _ph(f'*{_escape_mdv2(m.group(1).strip())}*'),
-        s,
-        flags=re.MULTILINE,
-    )
-
-    # 5) Convert bold **text** → *text*
-    s = re.sub(
-        r'\*\*(.+?)\*\*',
-        lambda m: _ph(f'*{_escape_mdv2(m.group(1))}*'),
-        s,
-    )
-
-    # 6) Convert italic *text* → _text_
-    s = re.sub(
-        r'\*([^*\n]+)\*',
-        lambda m: _ph(f'_{_escape_mdv2(m.group(1))}_'),
-        s,
-    )
-
-    # 7) Convert strikethrough ~~text~~ → ~text~
-    s = re.sub(
-        r'~~(.+?)~~',
-        lambda m: _ph(f'~{_escape_mdv2(m.group(1))}~'),
-        s,
-    )
-
-    # 8) Convert spoiler ||text||
-    s = re.sub(
-        r'\|\|(.+?)\|\|',
-        lambda m: _ph(f'||{_escape_mdv2(m.group(1))}||'),
-        s,
-    )
-
-    # 9) Escape remaining special chars outside protected regions
-    s = _escape_mdv2(s)
-
-    # 10) Restore placeholders in reverse order
-    for key in reversed(list(placeholders.keys())):
-        s = s.replace(key, placeholders[key])
-
-    return s
-
-
 async def _standalone_send(pconfig, chat_id, message, **kwargs) -> dict:
     """Standalone sender for cron delivery — opens ephemeral connection."""
     base_url = os.getenv("CHATWOOT_BASE_URL", "").rstrip("/")
@@ -379,8 +269,6 @@ async def _standalone_send(pconfig, chat_id, message, **kwargs) -> dict:
     if len(parts) != 3:
         return {"error": f"Invalid chat_id: {chat_id}"}
     _, account_id, conversation_id = parts
-    # Standalone sender has no platform context — strip markdown for safety
-    message = strip_markdown(message)
     try:
         from aiohttp import ClientSession, ClientTimeout
 
@@ -394,7 +282,7 @@ async def _standalone_send(pconfig, chat_id, message, **kwargs) -> dict:
         ) as session:
             async with session.post(
                 f"/api/v1/accounts/{account_id}/conversations/{conversation_id}/messages",
-                json={"content": message, "message_type": "outgoing", "content_type": "text"},
+                json={"content": message, "message_type": "outgoing"},
             ) as resp:
                 if resp.status >= 400:
                     return {"error": f"HTTP {resp.status}"}
