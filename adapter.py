@@ -31,6 +31,7 @@ except ImportError:
     web = None
     ClientSession = None
 
+from gateway.platforms.helpers import strip_markdown
 from gateway.config import Platform
 from gateway.platforms.base import (
     BasePlatformAdapter,
@@ -164,6 +165,8 @@ class ChatwootAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+
+        content = strip_markdown(content)
 
         parts = chat_id.split(":", 2)
         if len(parts) != 3:
